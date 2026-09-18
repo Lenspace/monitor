@@ -610,8 +610,10 @@ const REGISTER_LIMIT: i64 = 100;
 /// that has never contacted the hub. A key issued by the panel, valid only within
 /// [`REGISTER_WINDOW`], serves in place of a session.
 ///
-/// One request costs two setting reads, a `COUNT` and an `INSERT`. It makes no
-/// outbound request, and the router's 64 KiB body limit bounds the name.
+/// One request costs two setting reads, a `COUNT`, and one transaction inserting
+/// the `node` and `traffic` rows plus a `ping_node` row per `auto_join` probe, at
+/// most 64. It makes no outbound request, and the router's 64 KiB body limit
+/// bounds the name.
 pub async fn agent_register(
     State(app): State<Shared>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
@@ -1628,6 +1630,8 @@ mod tests {
                 target: target.to_owned(),
                 interval: 60,
                 nodes: vec![],
+                auto_join: false,
+                base: None,
             };
             save_ping_task(Admin, State(app.clone()), Json(task))
         };
@@ -1655,6 +1659,8 @@ mod tests {
                 target: "1.1.1.1:443".into(),
                 interval,
                 nodes: vec![],
+                auto_join: false,
+                base: None,
             };
             save_ping_task(Admin, State(app.clone()), Json(task))
         };
@@ -1809,6 +1815,8 @@ mod tests {
                 target: "1.1.1.1:443".into(),
                 interval: 60,
                 nodes,
+                auto_join: false,
+                base: None,
             })
             .unwrap()
     }

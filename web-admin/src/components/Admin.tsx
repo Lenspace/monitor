@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
-import { Bell, CalendarClock, ChevronRight, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Send, Server, Settings, Shield, Trash2, Upload } from "lucide-react"
+import { Bell, CalendarClock, ChevronRight, Copy, Database, Download, GripVertical, Palette, Pencil, Plus, Radio, RefreshCw, Search, Send, Server, Settings, Shield, Trash2, Upload } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -70,6 +70,68 @@ function Addresses({ node }: { node: Node }) {
           <Copy className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
         </button>
       ))}
+    </div>
+  )
+}
+
+// Name, address and country: what a node is looked up by, in every node list.
+function searchNodes(nodes: Node[], query: string) {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return nodes
+  return nodes.filter((n) =>
+    [n.name, n.ip, n.ipv4, n.ipv6, n.ipv4_pin, n.ipv6_pin, n.country].some((v) => v?.toLowerCase().includes(needle)))
+}
+
+function NodeSearch({ value, onChange, className = "" }: { value: string; onChange: (value: string) => void; className?: string }) {
+  return (
+    <div className={`relative ${className}`}>
+      <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+      <Input className="pl-8" placeholder="名称/地址/地区" aria-label="搜索节点" value={value} onChange={(e) => onChange(e.target.value)} />
+    </div>
+  )
+}
+
+// Ticks nodes in a searchable grid. 全选 and 全不选 act on the rows in view, so a
+// search narrows what they touch: search JP, then 全选. Offline nodes are dimmed
+// but remain selectable.
+function NodePicker({ nodes, chosen, onPick, disabled = false }: {
+  nodes: Node[]
+  chosen: Set<number>
+  onPick: (list: Node[], on: boolean) => void
+  disabled?: boolean
+}) {
+  const [query, setQuery] = useState("")
+  // The unfiltered list's height, held as its floor: in a centred dialog a
+  // shrinking list would move the search box out from under the cursor.
+  const [listHeight, setListHeight] = useState(0)
+  const visible = searchNodes(nodes, query)
+  const visibleChosen = visible.filter((n) => chosen.has(n.id)).length
+  return (
+    <div className="rounded-lg border">
+      <div className="flex items-center gap-1 border-b p-2">
+        <NodeSearch className="min-w-0 flex-1" value={query} onChange={setQuery} />
+        <Button size="sm" variant="ghost" className="px-2.5" disabled={disabled || visibleChosen === visible.length} onClick={() => onPick(visible, true)}>全选</Button>
+        <Button size="sm" variant="ghost" className="px-2.5" disabled={disabled || visibleChosen === 0} onClick={() => onPick(visible, false)}>全不选</Button>
+      </div>
+      {/* Three columns keep a few dozen nodes within one scroll. */}
+      <div
+        ref={(el) => { if (el && !listHeight) setListHeight(el.offsetHeight) }}
+        // Capped like the height itself, which a min-height would otherwise
+        // override once the viewport shrinks.
+        style={{ minHeight: listHeight ? `min(${listHeight}px, 16rem, 40dvh)` : undefined }}
+        className="grid max-h-[min(16rem,40dvh)] grid-cols-2 content-start gap-0.5 overflow-y-auto p-1.5 sm:grid-cols-3"
+      >
+        {visible.map((n) => (
+          <label key={n.id} title={n.name} className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted">
+            <input type="checkbox" checked={chosen.has(n.id)} disabled={disabled} onChange={(e) => onPick([n], e.target.checked)} className="shrink-0 accent-primary" />
+            <span className={`truncate ${n.online ? "" : "text-muted-foreground"}`}>{n.name}</span>
+            {n.country && <span className="ml-auto shrink-0 text-xs text-muted-foreground">{n.country}</span>}
+          </label>
+        ))}
+        {!visible.length && (
+          <p className="col-span-full p-2 text-xs text-muted-foreground">{nodes.length ? "没有匹配的节点" : "先添加节点"}</p>
+        )}
+      </div>
     </div>
   )
 }
@@ -618,13 +680,10 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
     ...manualOrder.map((id) => byId.get(id)).filter((node): node is Node => Boolean(node)),
     ...nodes.filter((node) => !orderedIds.has(node.id)),
   ]
-  // Name and address, the two things a row is looked up by. `order` itself stays
-  // whole, because the order sent on drop is the order of every node.
-  const needle = query.trim().toLowerCase()
-  const visible = needle
-    ? order.filter((n) =>
-      [n.name, n.ip, n.ipv4, n.ipv6, n.ipv4_pin, n.ipv6_pin].some((v) => v?.toLowerCase().includes(needle)))
-    : order
+  // `order` itself stays whole, because the order sent on drop is the order of
+  // every node.
+  const visible = searchNodes(order, query)
+  const searching = query.trim() !== ""
 
   async function remove() {
     if (!deleting) return
@@ -673,13 +732,7 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
     <div className="space-y-4">
       {!canProvision && <p className="text-sm text-muted-foreground">请通过 HTTPS 域名访问面板后添加或安装节点。</p>}
       <div className="flex flex-wrap items-center justify-end gap-2">
-        <Input
-          className="mr-auto w-full sm:w-64"
-          placeholder="搜索名称或地址"
-          aria-label="搜索节点"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+        <NodeSearch className="mr-auto w-full sm:w-64" value={query} onChange={setQuery} />
         {/* An open window is visible from the list itself, so nobody has to
             remember they left one open. */}
         <Button variant="outline" disabled={!canProvision} onClick={() => setRegistering(true)}>
@@ -720,13 +773,13 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      draggable={!needle}
+                      draggable={!searching}
                       // A drop sends the order of every node, and a filtered list
                       // offers only its own rows to drop onto, so the index below
                       // is the full one exactly while nothing is filtered out.
-                      disabled={!!needle}
+                      disabled={searching}
                       className="cursor-grab touch-none rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground active:cursor-grabbing disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
-                      title={needle ? "清空搜索后可拖动排序" : "拖动排序"}
+                      title={searching ? "清空搜索后可拖动排序" : "拖动排序"}
                       aria-label={`拖动 ${n.name} 排序`}
                       onDragStart={(e) => {
                         orderBeforeDrag.current = order.map((node) => node.id)
@@ -811,7 +864,7 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
                 </TableCell>
               </TableRow>
             )}
-            {needle && nodes.length > 0 && !visible.length && (
+            {searching && nodes.length > 0 && !visible.length && (
               <TableRow>
                 <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
                   没有匹配的节点
@@ -862,31 +915,116 @@ function Nodes({ nodes, refresh, site, canProvision }: { nodes: Node[]; refresh:
   )
 }
 
-function Ping({ nodes }: { nodes: Node[] }) {
-  const [tasks, setTasks] = useState<PingTask[]>([])
-  const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
-  const [deleting, setDeleting] = useState<PingTask | null>(null)
+function PingForm({ task, nodes, onClose, onSaved }: {
+  task: Partial<PingTask>
+  nodes: Node[]
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const [form, setForm] = useState(task)
   const [saving, setSaving] = useState(false)
-  const [removing, setRemoving] = useState(false)
+  // The assignments as the hub holds them, as far as this dialog can tell: those
+  // loaded, plus any node that registers while it is open, which an auto_join
+  // probe takes at once. Shown ticked, so unticking one removes it.
+  const base = useRef(task.nodes ?? [])
+  const seen = useRef(new Set(nodes.map((n) => n.id)))
+  useEffect(() => {
+    const fresh = nodes.filter((n) => !seen.current.has(n.id)).map((n) => n.id)
+    for (const id of fresh) seen.current.add(id)
+    if (!task.auto_join || !fresh.length) return
+    base.current = [...base.current, ...fresh]
+    setForm((f) => ({ ...f, nodes: [...(f.nodes ?? []), ...fresh] }))
+  }, [nodes, task.auto_join])
+  const chosen = new Set(form.nodes)
+  // Counted against the live list: `form.nodes` can still name a node deleted
+  // since the probes were loaded.
+  const chosenCount = nodes.filter((n) => chosen.has(n.id)).length
 
-  const load = () => api<{ tasks: PingTask[] }>("/ping-tasks").then((d) => setTasks(d.tasks)).catch(() => {})
-  useEffect(() => { load() }, [])
+  const pick = (list: Node[], on: boolean) =>
+    setForm((f) => {
+      const next = new Set(f.nodes)
+      for (const n of list) {
+        if (on) next.add(n.id)
+        else next.delete(n.id)
+      }
+      return { ...f, nodes: [...next] }
+    })
 
   async function save() {
-    if (!editing) return
-    if (!editing.name?.trim() || !editing.target?.trim()) return toast.error("请填写名称和目标")
+    if (!form.name?.trim() || !form.target?.trim()) return toast.error("请填写名称和目标")
     setSaving(true)
     try {
-      await api("/ping-tasks", { method: "POST", body: JSON.stringify(editing) })
+      // `base` limits the save to what was ticked or unticked here; a node that
+      // joined through auto_join while the dialog was open keeps its assignment.
+      await api("/ping-tasks", { method: "POST", body: JSON.stringify(task.id ? { ...form, base: base.current } : form) })
       toast.success("已保存，正在下发")
-      setEditing(null)
-      load()
+      onClose()
+      onSaved()
     } catch (e) {
       toast.error((e as Error).message)
     } finally {
       setSaving(false)
     }
   }
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent onOpenAutoFocus={(e) => e.preventDefault()} className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{task.id ? "编辑监控" : "添加监控"}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-6">
+          {/* On a phone the name takes the first row and the target shares the
+              second with the interval, so the tab order matches the screen. */}
+          <section className="grid grid-cols-[1fr_6rem] gap-4 sm:grid-cols-[1fr_1.4fr_6rem]">
+            <Field label="名称" className="col-span-full sm:col-span-1">
+              {/* A new monitor starts empty, so the cursor belongs here;
+                  editing an existing one starts with nothing selected. */}
+              <Input autoFocus={!task.id} value={form.name ?? ""} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Cloudflare" />
+            </Field>
+            <Field label="目标地址" hint="host:port，每个节点各自 TCP 连接">
+              <Input value={form.target ?? ""} onChange={(e) => setForm({ ...form, target: e.target.value })} placeholder="1.1.1.1:443" />
+            </Field>
+            <Field label="间隔（秒）" hint="5–3600">
+              {/* An emptied number box reads back as "", and Number("") is 0,
+                  which the hub refuses. */}
+              <Input type="number" min="5" max="3600" value={form.interval ?? 60} onChange={(e) => setForm({ ...form, interval: Number(e.target.value) || 60 })} />
+            </Field>
+          </section>
+          <section className="space-y-3 border-t pt-5">
+            <div className="flex items-baseline justify-between gap-2">
+              <h3 className="text-sm font-medium">运行节点</h3>
+              <span className="tnum text-xs text-muted-foreground">已选 {chosenCount} / {nodes.length}</span>
+            </div>
+            <NodePicker nodes={nodes} chosen={chosen} onPick={pick} />
+            <label className="flex cursor-pointer items-center justify-between gap-4 rounded-lg border bg-muted/30 px-3 py-2.5 text-sm">
+              <span>
+                <span className="block font-medium">新节点自动加入</span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">以后添加的节点自动运行此监控</span>
+              </span>
+              <Switch checked={!!form.auto_join} onCheckedChange={(v) => setForm({ ...form, auto_join: v })} />
+            </label>
+          </section>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button onClick={save} disabled={saving}>保存</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function Ping({ nodes }: { nodes: Node[] }) {
+  const [tasks, setTasks] = useState<PingTask[]>([])
+  const [editing, setEditing] = useState<Partial<PingTask> | null>(null)
+  const [deleting, setDeleting] = useState<PingTask | null>(null)
+  const [removing, setRemoving] = useState(false)
+
+  const load = () => api<{ tasks: PingTask[] }>("/ping-tasks").then((d) => setTasks(d.tasks)).catch(() => {})
+  // A node added or removed changes assignments on the hub: auto_join adds, a
+  // deletion cascades.
+  useEffect(() => { load() }, [nodes.length])
 
   async function remove() {
     if (!deleting) return
@@ -903,17 +1041,10 @@ function Ping({ nodes }: { nodes: Node[] }) {
     }
   }
 
-  const toggle = (id: number) =>
-    setEditing((t) => {
-      if (!t) return t
-      const nodes = t.nodes ?? []
-      return { ...t, nodes: nodes.includes(id) ? nodes.filter((n) => n !== id) : [...nodes, id] }
-    })
-
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
-        <Button onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: [] })}>
+        <Button onClick={() => setEditing({ name: "", target: "", interval: 60, nodes: nodes.map((n) => n.id), auto_join: true })}>
           <Plus /> 添加监控
         </Button>
       </div>
@@ -922,10 +1053,10 @@ function Ping({ nodes }: { nodes: Node[] }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[24%]">名称</TableHead>
-              <TableHead className="w-[40%]">目标</TableHead>
-              <TableHead className="w-[12%]">间隔</TableHead>
-              <TableHead className="w-[12%]">节点</TableHead>
+              <TableHead className="w-[22%]">名称</TableHead>
+              <TableHead className="w-[34%]">目标</TableHead>
+              <TableHead className="w-[10%]">间隔</TableHead>
+              <TableHead className="w-[22%]">节点</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
@@ -935,7 +1066,10 @@ function Ping({ nodes }: { nodes: Node[] }) {
                 <TableCell className="font-medium">{t.name}</TableCell>
                 <TableCell className="tnum text-sm">{t.target}</TableCell>
                 <TableCell className="tnum text-sm">{t.interval}s</TableCell>
-                <TableCell className="text-sm text-muted-foreground">{t.nodes.length} 个</TableCell>
+                <TableCell className="text-sm whitespace-nowrap text-muted-foreground">
+                  {t.nodes.length > 0 && t.nodes.length === nodes.length ? "全部" : `${t.nodes.length} 个`}
+                  {t.auto_join && <Badge variant="outline" className="ml-2 font-normal">自动加入</Badge>}
+                </TableCell>
                 <TableCell className="text-right whitespace-nowrap">
                   <Button variant="ghost" size="icon" onClick={() => setEditing(t)} title="编辑监控" aria-label="编辑监控"><Pencil /></Button>
                   <Button variant="ghost" size="icon" onClick={() => setDeleting(t)} title="删除监控" aria-label="删除监控">
@@ -955,51 +1089,7 @@ function Ping({ nodes }: { nodes: Node[] }) {
         </Table>
       </Card>
 
-      {editing && (
-        <Dialog open onOpenChange={(open) => !open && setEditing(null)}>
-          <DialogContent onOpenAutoFocus={(e) => e.preventDefault()} className="sm:max-w-xl">
-            <DialogHeader>
-              <DialogTitle>{editing.id ? "编辑监控" : "添加监控"}</DialogTitle>
-            </DialogHeader>
-            <div className="space-y-5">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Field label="名称">
-                  {/* A new monitor starts empty, so the cursor belongs here;
-                      editing an existing one starts with nothing selected. */}
-                  <Input autoFocus={!editing.id} value={editing.name ?? ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} placeholder="Cloudflare" />
-                </Field>
-                <Field label="间隔（秒）" hint="5–3600">
-                  {/* `|| 60`, as the three other number boxes on this page do:
-                      an emptied `type="number"` reads back as "", and Number("")
-                      is 0 -- which the hub used to clamp into a 5-second probe on
-                      every assigned node. It refuses that now, so this keeps a
-                      cleared box from being a round trip to an error. */}
-                  <Input type="number" min="5" max="3600" value={editing.interval ?? 60} onChange={(e) => setEditing({ ...editing, interval: Number(e.target.value) || 60 })} />
-                </Field>
-              </div>
-              <Field label="目标地址" hint="host:port">
-                <Input value={editing.target ?? ""} onChange={(e) => setEditing({ ...editing, target: e.target.value })} placeholder="1.1.1.1:443" />
-              </Field>
-              <div className="space-y-2">
-                <Label className="text-sm font-medium">运行节点</Label>
-                <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border bg-muted/20 p-2">
-                  {nodes.map((n) => (
-                    <label key={n.id} className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-2 text-sm hover:bg-background">
-                      <input type="checkbox" checked={editing.nodes?.includes(n.id) ?? false} onChange={() => toggle(n.id)} className="accent-primary" />
-                      {n.name}
-                    </label>
-                  ))}
-                  {nodes.length === 0 && <p className="p-2 text-xs text-muted-foreground">先添加节点</p>}
-                </div>
-              </div>
-            </div>
-            <DialogFooter>
-              <Button variant="ghost" onClick={() => setEditing(null)}>取消</Button>
-              <Button onClick={save} disabled={saving}>保存</Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      )}
+      {editing && <PingForm task={editing} nodes={nodes} onClose={() => setEditing(null)} onSaved={load} />}
       {deleting && (
         <ConfirmDialog
           title={`删除监控「${deleting.name}」？`}
@@ -1410,29 +1500,14 @@ function OfflineNodes({ nodes, refresh }: { nodes: Node[]; refresh: () => void }
     }
   }
 
-  const enabled = nodes.filter((n) => n.notify).length
+  const enabled = new Set(nodes.filter((n) => n.notify).map((n) => n.id))
   return (
     <Card className="gap-4 p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-medium">离线通知</h3>
-          <p className="mt-1 text-xs text-muted-foreground">按节点打开，默认关。已打开 {enabled} / {nodes.length} 台</p>
-        </div>
-        <div className="flex gap-2">
-          <Button size="sm" variant="secondary" disabled={busy || enabled === nodes.length} onClick={() => apply(nodes, true)}>全部打开</Button>
-          <Button size="sm" variant="ghost" disabled={busy || enabled === 0} onClick={() => apply(nodes, false)}>全部关闭</Button>
-        </div>
+      <div>
+        <h3 className="text-sm font-medium">离线通知</h3>
+        <p className="mt-1 text-xs text-muted-foreground">按节点打开，默认关。已打开 {enabled.size} / {nodes.length} 台</p>
       </div>
-      {nodes.length > 0 && (
-        <div className="grid max-h-64 gap-x-6 gap-y-2 overflow-y-auto sm:grid-cols-2">
-          {nodes.map((node) => (
-            <label key={node.id} className="flex cursor-pointer items-center justify-between gap-3 text-sm">
-              <span className="truncate">{node.name}</span>
-              <Switch checked={!!node.notify} disabled={busy} onCheckedChange={(v) => apply([node], v)} />
-            </label>
-          ))}
-        </div>
-      )}
+      <NodePicker nodes={nodes} chosen={enabled} onPick={apply} disabled={busy} />
     </Card>
   )
 }
