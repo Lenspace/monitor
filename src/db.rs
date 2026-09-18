@@ -55,10 +55,19 @@ CREATE TABLE IF NOT EXISTS node (
   swap_total INTEGER NOT NULL DEFAULT 0, disk_total INTEGER NOT NULL DEFAULT 0,
   agent_version TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '',
   ipv4 TEXT NOT NULL DEFAULT '', ipv6 TEXT NOT NULL DEFAULT '',
-  -- ISO 3166-1 alpha-2, looked up from `ip` once per address. Empty until the
-  -- lookup answers, and empty is what a node whose country nobody could tell
-  -- stays: the public page just leaves the badge off.
+  -- ISO 3166-1 alpha-2, looked up from `country_ip` once per address. Empty
+  -- until the lookup answers, and empty is what a node whose country nobody
+  -- could tell stays: the public page just leaves the badge off.
   country TEXT NOT NULL DEFAULT '',
+  -- The address `country` belongs to: a public interface address the agent
+  -- reported, else `ip`. Empty when neither is public.
+  country_ip TEXT NOT NULL DEFAULT '',
+  -- Set in the panel. When not empty it is the country shown, in place of the
+  -- looked-up one, which goes on updating underneath.
+  country_pin TEXT NOT NULL DEFAULT '',
+  -- Set in the panel, each replacing the address shown for its family. Empty
+  -- means automatic. Panel only, like the reported addresses.
+  ipv4_pin TEXT NOT NULL DEFAULT '', ipv6_pin TEXT NOT NULL DEFAULT '',
   -- Survives the disconnection it describes, unlike the in-memory live entry:
   -- an offline node's page is exactly where "since when" is worth reading.
   last_seen INTEGER NOT NULL DEFAULT 0,
@@ -127,8 +136,19 @@ CREATE TABLE IF NOT EXISTS session (
 
 /// Schema revision this build expects, stamped into `PRAGMA user_version`.
 /// Increment it and add a `migrate_to_N` when the schema changes under a
-/// database already in service.
-const SCHEMA_VERSION: i64 = 4;
+/// database already in service. Every migration must be:
+///
+/// - Additive: a new column carries a default, and no column an earlier build
+///   reads is renamed or dropped. install-hub.sh rolls a hub that fails to start
+///   back to the previous binary, which then runs on the migrated file.
+/// - Safe to run twice: an earlier build stamps its own, lower version into a
+///   newer file, and the next upgrade runs the migration again.
+///
+/// A new column goes into `SCHEMA` as well, for fresh files, but an index on it
+/// cannot: `open` runs `SCHEMA` before migrating, and on an older file the
+/// column is not there yet. `an_upgraded_release_matches_a_fresh_database`
+/// holds every migration to these rules, starting from v1.0.0's schema.
+const SCHEMA_VERSION: i64 = 5;
 
 /// Adds a column older databases lack. A duplicate column indicates the
 /// migration has already run; every other error must propagate.
@@ -189,16 +209,14 @@ fn migrate_to_1(conn: &Connection) -> Result<()> {
     // retention.
     if schema_mentions(conn, "ping_record", "(node_id, task_id, ts)")? {
         conn.execute_batch(
-            "BEGIN;
-             CREATE TABLE ping_record_rekeyed (
+            "CREATE TABLE ping_record_rekeyed (
                node_id INTEGER NOT NULL, task_id INTEGER NOT NULL,
                ts INTEGER NOT NULL, latency INTEGER NOT NULL,
                PRIMARY KEY (node_id, ts, task_id)
              ) WITHOUT ROWID;
              INSERT INTO ping_record_rekeyed SELECT * FROM ping_record;
              DROP TABLE ping_record;
-             ALTER TABLE ping_record_rekeyed RENAME TO ping_record;
-             COMMIT;",
+             ALTER TABLE ping_record_rekeyed RENAME TO ping_record;",
         )?;
         info!("rebuilt ping_record on a key the latency chart can seek");
     }
@@ -230,26 +248,49 @@ fn migrate_to_4(conn: &Connection) -> Result<()> {
     add_column(conn, "node", "down_since INTEGER NOT NULL DEFAULT 0")
 }
 
+/// Every country stored until now was looked up from `ip`. Recording that
+/// keeps the badge of a node whose lookup address is still `ip`, and has a node
+/// whose public interface address now takes precedence looked up again at its
+/// next hello. The columns set by hand start empty: automatic.
+fn migrate_to_5(conn: &Connection) -> Result<()> {
+    add_column(conn, "node", "country_ip TEXT NOT NULL DEFAULT ''")?;
+    add_column(conn, "node", "country_pin TEXT NOT NULL DEFAULT ''")?;
+    add_column(conn, "node", "ipv4_pin TEXT NOT NULL DEFAULT ''")?;
+    add_column(conn, "node", "ipv6_pin TEXT NOT NULL DEFAULT ''")?;
+    conn.execute("UPDATE node SET country_ip = ip WHERE country != ''", [])?;
+    Ok(())
+}
+
 /// Brings a database already in service up to `SCHEMA_VERSION` and stamps it.
 /// `from` is its current version, so a fresh file passes `SCHEMA_VERSION` and
 /// receives only the stamp.
 ///
+/// One transaction covers every step and the stamp. SQLite rolls back schema
+/// changes and `user_version` alike, so a failure part-way -- a full disk, a
+/// killed process -- leaves the file at the version it started from rather than
+/// between two.
+///
 /// Restoring a backup also arrives here: the copy carries its own version and
 /// requires the same migrations a restart would have run.
 fn migrate(conn: &Connection, from: i64) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
     if from < 1 {
-        migrate_to_1(conn)?;
+        migrate_to_1(&tx)?;
     }
     if from < 2 {
-        migrate_to_2(conn)?;
+        migrate_to_2(&tx)?;
     }
     if from < 3 {
-        migrate_to_3(conn)?;
+        migrate_to_3(&tx)?;
     }
     if from < 4 {
-        migrate_to_4(conn)?;
+        migrate_to_4(&tx)?;
     }
-    conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+    if from < 5 {
+        migrate_to_5(&tx)?;
+    }
+    tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -315,10 +356,23 @@ pub struct Node {
     pub ipv4: String,
     #[serde(default)]
     pub ipv6: String,
-    /// ISO 3166-1 alpha-2 for `ip`, uppercase, or empty when unknown. Public: it
-    /// appears on the status page beside the node's name.
+    /// ISO 3166-1 alpha-2, uppercase, or empty when unknown; see
+    /// `agent_ws::country_source` for the address it is looked up from. Public:
+    /// it appears on the status page beside the node's name.
     #[serde(default)]
     pub country: String,
+    /// Set in the panel: two uppercase letters, or empty for the looked-up
+    /// `country`. What the status page shows is this when present.
+    #[serde(default)]
+    pub country_pin: String,
+    /// Set in the panel, in canonical form, for what neither agent nor hub can
+    /// know: the home line behind a transparent proxy, or which of several public
+    /// addresses to show. Each replaces the address shown for its family; empty
+    /// is automatic. Panel only, like `ip`.
+    #[serde(default)]
+    pub ipv4_pin: String,
+    #[serde(default)]
+    pub ipv6_pin: String,
     /// Unix seconds of the node's last report, written once a minute alongside
     /// the metric row. Zero for a node that has never reported.
     #[serde(default)]
@@ -354,6 +408,9 @@ pub struct NodePatch {
     pub traffic_mode: Option<String>,
     pub traffic_reset_day: Option<u32>,
     pub notify: Option<bool>,
+    pub country_pin: Option<String>,
+    pub ipv4_pin: Option<String>,
+    pub ipv6_pin: Option<String>,
 }
 
 fn expiry_patch<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
@@ -575,7 +632,8 @@ impl Db {
                              remark=COALESCE(?10,remark), traffic_limit=COALESCE(?11,traffic_limit),
                              traffic_mode=COALESCE(?12,traffic_mode),
                              traffic_reset_day=COALESCE(?13,traffic_reset_day),
-                             notify=COALESCE(?14,notify)
+                             notify=COALESCE(?14,notify), country_pin=COALESCE(?15,country_pin),
+                             ipv4_pin=COALESCE(?16,ipv4_pin), ipv6_pin=COALESCE(?17,ipv6_pin)
              WHERE id=?1",
             params![
                 id,
@@ -591,7 +649,10 @@ impl Db {
                 n.traffic_limit,
                 n.traffic_mode,
                 n.traffic_reset_day,
-                n.notify
+                n.notify,
+                n.country_pin,
+                n.ipv4_pin,
+                n.ipv6_pin
             ],
         )?;
         Ok(found > 0)
@@ -649,12 +710,14 @@ impl Db {
     }
 
     /// Stores the slow-changing facts an agent sends on connect, and reports
-    /// whether the node still requires a country lookup.
+    /// whether the node still requires a country lookup for `source`, the address
+    /// `agent_ws::country_source` chose. An empty `source` has no country and is
+    /// never owed one.
     ///
-    /// A new address invalidates the previous country, so the two move together in
+    /// A new source invalidates the previous country, so the two move together in
     /// one statement: `SET` reads the row as it was, so the comparison is against
     /// the stored address rather than the one being written.
-    pub fn save_facts(&self, id: i64, f: &serde_json::Value, ip: &str) -> Result<bool> {
+    pub fn save_facts(&self, id: i64, f: &serde_json::Value, ip: &str, source: &str) -> Result<bool> {
         // The same rule `api::agent_register` applies to the name it receives:
         // these values come from an unvouched machine, control characters break
         // the panel's rows, and the length must be bounded. Six of them -- os,
@@ -677,8 +740,8 @@ impl Db {
         conn.execute(
             "UPDATE node SET hostname=?2, os=?3, kernel=?4, arch=?5, virt=?6, cpu_name=?7,
                              cpu_cores=?8, mem_total=?9, swap_total=?10, disk_total=?11,
-                             agent_version=?12, ip=?13, ipv4=?14, ipv6=?15,
-                             country=CASE WHEN ip=?13 THEN country ELSE '' END
+                             agent_version=?12, ip=?13, ipv4=?14, ipv6=?15, country_ip=?16,
+                             country=CASE WHEN country_ip=?16 THEN country ELSE '' END
              WHERE id=?1",
             params![
                 id,
@@ -695,10 +758,26 @@ impl Db {
                 s("agent_version"),
                 ip,
                 s("ipv4"),
-                s("ipv6")
+                s("ipv6"),
+                source
             ],
         )?;
-        Ok(conn.query_row("SELECT country = '' FROM node WHERE id=?1", [id], |r| r.get(0))?)
+        let blank: bool = conn.query_row("SELECT country = '' FROM node WHERE id=?1", [id], |r| r.get(0))?;
+        Ok(blank && !source.is_empty())
+    }
+
+    /// Whether the node still lacks a country for `source`: false once a lookup
+    /// has landed, or once the node has moved to another address.
+    pub fn country_owed(&self, id: i64, source: &str) -> Result<bool> {
+        let owed = self
+            .conn()
+            .query_row(
+                "SELECT country = '' FROM node WHERE id=?1 AND country_ip=?2",
+                params![id, source],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(owed.unwrap_or(false))
     }
 
     /// Records the country a lookup returned, unless the node moved to another
@@ -707,8 +786,9 @@ impl Db {
     /// was asked about, so a late answer for an address the node has left is not
     /// an answer about the node. Kept apart from the panel's own writes:
     /// `update_node` never touches this column.
-    pub fn set_country(&self, id: i64, cc: &str, ip: &str) -> Result<()> {
-        self.conn().execute("UPDATE node SET country=?2 WHERE id=?1 AND ip=?3", params![id, cc, ip])?;
+    pub fn set_country(&self, id: i64, cc: &str, source: &str) -> Result<()> {
+        self.conn()
+            .execute("UPDATE node SET country=?2 WHERE id=?1 AND country_ip=?3", params![id, cc, source])?;
         Ok(())
     }
 
@@ -1559,6 +1639,9 @@ fn row_to_node(r: &rusqlite::Row<'_>) -> Node {
         ipv4: s("ipv4"),
         ipv6: s("ipv6"),
         country: s("country"),
+        country_pin: s("country_pin"),
+        ipv4_pin: s("ipv4_pin"),
+        ipv6_pin: s("ipv6_pin"),
         last_seen: n("last_seen"),
         notify: n("notify") != 0,
         down_since: n("down_since"),
@@ -1802,7 +1885,7 @@ mod tests {
         let db = db();
         let id = node(&db, 1);
         let facts = serde_json::json!({"hostname": "h"});
-        let save = |ip: &str| db.save_facts(id, &facts, ip).unwrap();
+        let save = |ip: &str| db.save_facts(id, &facts, ip, ip).unwrap();
         let stored = || db.node(id).unwrap().unwrap().country;
 
         assert!(save("198.51.100.4"), "a node with no country is owed a lookup");
@@ -1811,12 +1894,47 @@ mod tests {
         assert_eq!(stored(), "US");
         assert!(save("203.0.113.9"), "a new address is a new question");
         assert_eq!(stored(), "", "and the answer to the old one is gone");
+        assert!(db.country_owed(id, "203.0.113.9").unwrap(), "owed until an answer lands");
+        assert!(!db.country_owed(id, "198.51.100.4").unwrap(), "nothing is owed for an address left behind");
 
         // A lookup issued for the old address, arriving after the move.
         db.set_country(id, "US", "198.51.100.4").unwrap();
         assert_eq!(stored(), "", "an answer about an address the node has left is dropped");
         db.set_country(id, "JP", "203.0.113.9").unwrap();
         assert_eq!(stored(), "JP", "the answer about the address it is at now lands");
+        assert!(!db.country_owed(id, "203.0.113.9").unwrap());
+
+        // The source, not the connection address, is what the country belongs to:
+        // a proxy exit changing under a node with a public interface address
+        // leaves the badge alone.
+        assert!(!db.save_facts(id, &facts, "198.51.100.77", "203.0.113.9").unwrap());
+        assert_eq!(stored(), "JP");
+        // Nothing public to look up: no country, and none owed.
+        assert!(!db.save_facts(id, &facts, "192.168.1.2", "").unwrap());
+        assert_eq!(stored(), "");
+    }
+
+    /// A hub before schema 5 looked every country up from `ip`. After the
+    /// upgrade a node whose source is still `ip` keeps its badge, and one whose
+    /// public interface address now takes precedence is asked about again.
+    #[test]
+    fn countries_stored_before_the_source_column_belong_to_the_connection_address() {
+        let db = db();
+        let (kept, moved) = (node(&db, 1), node(&db, 1));
+        let facts = serde_json::json!({});
+        for id in [kept, moved] {
+            db.save_facts(id, &facts, "198.51.100.4", "198.51.100.4").unwrap();
+            db.set_country(id, "SG", "198.51.100.4").unwrap();
+        }
+        {
+            let conn = db.conn();
+            conn.execute_batch("ALTER TABLE node DROP COLUMN country_ip").unwrap();
+            migrate(&conn, 4).unwrap();
+        }
+        assert!(!db.save_facts(kept, &facts, "198.51.100.4", "198.51.100.4").unwrap());
+        assert_eq!(db.node(kept).unwrap().unwrap().country, "SG");
+        assert!(db.save_facts(moved, &facts, "198.51.100.4", "2001:db8::5").unwrap());
+        assert_eq!(db.node(moved).unwrap().unwrap().country, "");
     }
 
     #[test]
@@ -2059,7 +2177,7 @@ mod tests {
     fn facts_from_an_unvouched_machine_cannot_choose_their_own_length() {
         let db = db();
         let id = node(&db, 1);
-        db.save_facts(id, &serde_json::json!({"os": "A".repeat(10_000), "hostname": "x\u{7}y"}), "ip")
+        db.save_facts(id, &serde_json::json!({"os": "A".repeat(10_000), "hostname": "x\u{7}y"}), "ip", "")
             .unwrap();
         let stored = db.node(id).unwrap().unwrap();
         assert_eq!(stored.os.chars().count(), 128);
@@ -2240,6 +2358,96 @@ mod tests {
         drop(db);
         assert!(Db::open(path).is_ok());
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// Every row of every table, comparable across two opens of one file.
+    fn dump(conn: &Connection) -> Vec<String> {
+        let mut rows = Vec::new();
+        for table in TABLES {
+            let mut stmt = conn.prepare(&format!("SELECT * FROM {table}")).unwrap();
+            let width = stmt.column_count();
+            let read =
+                |r: &rusqlite::Row| (0..width).map(|i| r.get::<_, rusqlite::types::Value>(i)).collect();
+            let mut found: Vec<String> = stmt
+                .query_map([], |r| read(r))
+                .unwrap()
+                .map(|row: rusqlite::Result<Vec<_>>| format!("{table} {:?}", row.unwrap()))
+                .collect();
+            found.sort();
+            rows.extend(found);
+        }
+        rows
+    }
+
+    /// A file as the oldest release left it, one row in every table.
+    fn release_file(path: &str) {
+        let old = Connection::open(path).unwrap();
+        old.execute_batch(include_str!("testdata/schema-v1.0.0.sql")).unwrap();
+        old.execute_batch(
+            "INSERT INTO setting VALUES ('site', 'https://hub.example.com');
+             INSERT INTO node (id, name, token, ip, country, created_at)
+               VALUES (1, 'n', 't', '198.51.100.4', 'US', 1);
+             INSERT INTO traffic (node_id, total_rx) VALUES (1, 5000);
+             INSERT INTO metric VALUES (1, 60, 12.5, 100, 0, 0, 0, 0, 0, 0, 0);
+             INSERT INTO ping_task (id, name, target) VALUES (1, 'cm', '1.1.1.1:443');
+             INSERT INTO ping_node VALUES (1, 1);
+             INSERT INTO ping_record VALUES (1, 1, 60, 42);
+             INSERT INTO session VALUES ('h', 9999999999);
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    }
+
+    /// v1.0.0's schema, opened by this build through the startup path. Fails on
+    /// a column `SCHEMA` gained without a migration or the reverse, on an index
+    /// in `SCHEMA` over a column only a migration adds, and on a migration that
+    /// changes the data when it runs a second time.
+    #[test]
+    fn an_upgraded_release_matches_a_fresh_database() {
+        let scratch = Scratch::new();
+        release_file(&scratch.0);
+        let db = Db::open(&scratch.0).unwrap();
+        let fresh = Db::open(":memory:").unwrap();
+        for table in TABLES {
+            assert_eq!(
+                columns_of(&db.conn(), table).unwrap(),
+                columns_of(&fresh.conn(), table).unwrap(),
+                "{table}"
+            );
+        }
+        let upgraded = dump(&db.conn());
+        assert_eq!(upgraded.len(), TABLES.len(), "every row survives: {upgraded:#?}");
+
+        // An earlier build opening the file stamps its own version, so the next
+        // upgrade runs every migration again.
+        db.conn().execute_batch("PRAGMA user_version = 3").unwrap();
+        drop(db);
+        let db = Db::open(&scratch.0).unwrap();
+        assert_eq!(dump(&db.conn()), upgraded, "a second run changes nothing");
+        let version: i64 = db.conn().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// The trigger fails the UPDATE in `migrate_to_5` after `migrate_to_4` has
+    /// added its columns: a failure part-way through an upgrade.
+    #[test]
+    fn a_failed_upgrade_leaves_the_file_as_it_was() {
+        let scratch = Scratch::new();
+        release_file(&scratch.0);
+        let state = |c: &Connection| {
+            let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            (version, columns_of(c, "node").unwrap(), dump(c))
+        };
+        let before = {
+            let c = Connection::open(&scratch.0).unwrap();
+            c.execute_batch(
+                "CREATE TRIGGER fail BEFORE UPDATE ON node BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+            )
+            .unwrap();
+            state(&c)
+        };
+        assert!(Db::open(&scratch.0).is_err());
+        assert_eq!(state(&Connection::open(&scratch.0).unwrap()), before, "no step of the upgrade remains");
     }
 
     /// Dropping `metric.load1` under a database in service. The column is
