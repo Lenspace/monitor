@@ -456,7 +456,22 @@ pub struct Traffic {
     pub day_tx: i64,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+impl Traffic {
+    /// This period's usage as the node's plan meters it. Summing both directions
+    /// regardless would hold a plan billed on upload alone against the wrong
+    /// figure. The traffic alert and `node_view` both read this, so the
+    /// percentage an alert quotes matches the usage the pages show.
+    pub fn month_used(&self, traffic_mode: &str) -> i64 {
+        match traffic_mode {
+            "up" => self.month_tx,
+            "down" => self.month_rx,
+            "max" => self.month_rx.max(self.month_tx),
+            _ => self.month_rx.saturating_add(self.month_tx),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct PingTask {
     #[serde(default)]
     pub id: i64,
@@ -1896,8 +1911,7 @@ mod tests {
                 target: "1.1.1.1:443".into(),
                 interval: 60,
                 nodes: vec![id],
-                auto_join: false,
-                base: None,
+                ..Default::default()
             })
             .unwrap();
         db.insert_ping(id, task, now - 9 * 86_400, 12).unwrap();
@@ -2128,6 +2142,13 @@ mod tests {
         assert_eq!((t.total_rx, t.total_tx), (8_000, 4_000), "the lifetime total never resets");
     }
 
+    /// Received 3, sent 5. "up" is the node's upload, which it sends.
+    #[test]
+    fn usage_is_counted_the_way_the_plan_meters_it() {
+        let t = Traffic { month_rx: 3, month_tx: 5, ..Default::default() };
+        assert_eq!(["sum", "up", "down", "max"].map(|mode| t.month_used(mode)), [8, 5, 3, 5]);
+    }
+
     #[test]
     fn period_start_handles_short_months_and_wraparound() {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
@@ -2154,8 +2175,7 @@ mod tests {
             target: "1.1.1.1:443".into(),
             interval: 60,
             nodes,
-            auto_join: false,
-            base: None,
+            ..Default::default()
         };
         let task = db.save_ping_task(&probe(vec![id])).unwrap();
         db.accumulate(id, "b", Some((10, 10))).unwrap();
@@ -2189,8 +2209,7 @@ mod tests {
             target: "1.1.1.1:443".into(),
             interval: 60,
             nodes: vec![id],
-            auto_join: false,
-            base: None,
+            ..Default::default()
         };
         let old = db.save_ping_task(&probe("tokyo")).unwrap();
         db.insert_ping(id, old, 1, 999).unwrap();
@@ -2219,8 +2238,7 @@ mod tests {
                 target: "1.1.1.1:443".into(),
                 interval: 60,
                 nodes: vec![mine],
-                auto_join: false,
-                base: None,
+                ..Default::default()
             })
             .unwrap();
 
@@ -2582,8 +2600,7 @@ mod tests {
                 target: "1.1.1.1:443".into(),
                 interval: 60,
                 nodes,
-                auto_join: false,
-                base: None,
+                ..Default::default()
             })
             .unwrap()
         };
@@ -2621,8 +2638,7 @@ mod tests {
                 target: "1.1.1.1:443".into(),
                 interval: 60,
                 nodes: vec![a, b],
-                auto_join: false,
-                base: None,
+                ..Default::default()
             })
             .unwrap();
         assert_eq!(db.ping_tasks_for(a).unwrap().len(), 1);
@@ -2634,8 +2650,7 @@ mod tests {
             target: "1.1.1.1:443".into(),
             interval: 30,
             nodes: vec![a],
-            auto_join: false,
-            base: None,
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(db.ping_tasks_for(b).unwrap().len(), 0);
@@ -2653,7 +2668,7 @@ mod tests {
             interval: 60,
             nodes: vec![],
             auto_join,
-            base: None,
+            ..Default::default()
         };
         let joining = db.save_ping_task(&probe(true)).unwrap();
         db.save_ping_task(&probe(false)).unwrap();
@@ -2736,8 +2751,7 @@ mod tests {
                 target: "1.1.1.1:443".into(),
                 interval: 60,
                 nodes,
-                auto_join: false,
-                base: None,
+                ..Default::default()
             })
         };
         for _ in 0..Db::MAX_PROBES_PER_NODE {

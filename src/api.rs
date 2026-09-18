@@ -129,6 +129,7 @@ fn node_view(node: &Node, current: Option<&Agent>, traffic: &Traffic, full: bool
         "total_tx": traffic.total_tx,
         "month_rx": traffic.month_rx,
         "month_tx": traffic.month_tx,
+        "month_used": traffic.month_used(&node.traffic_mode),
         "month_start": traffic.month_start,
         // Of the same nature as the month and lifetime figures beside it, which
         // the public page already shows, so this one is public as well.
@@ -1630,8 +1631,7 @@ mod tests {
                 target: target.to_owned(),
                 interval: 60,
                 nodes: vec![],
-                auto_join: false,
-                base: None,
+                ..Default::default()
             };
             save_ping_task(Admin, State(app.clone()), Json(task))
         };
@@ -1659,8 +1659,7 @@ mod tests {
                 target: "1.1.1.1:443".into(),
                 interval,
                 nodes: vec![],
-                auto_join: false,
-                base: None,
+                ..Default::default()
             };
             save_ping_task(Admin, State(app.clone()), Json(task))
         };
@@ -1815,8 +1814,7 @@ mod tests {
                 target: "1.1.1.1:443".into(),
                 interval: 60,
                 nodes,
-                auto_join: false,
-                base: None,
+                ..Default::default()
             })
             .unwrap()
     }
