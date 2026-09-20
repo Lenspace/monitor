@@ -1,5 +1,7 @@
 # monitor
 
+本 fork 的编译、发布、安装测试与上游 PR 步骤见 [FORK_TESTING.md](FORK_TESTING.md)。
+
 ## 特性
 
 - 实时监控：秒级实时数据展示
