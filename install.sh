@@ -18,6 +18,7 @@ TOKEN=""
 REGISTER=""
 INTERVAL=1
 INSECURE=""
+REPORT_ONLY=""
 
 while [ $# -gt 0 ]; do
 	# A flag with no argument: under set -u, `$2` aborts with the shell's own
@@ -32,12 +33,16 @@ while [ $# -gt 0 ]; do
 	--register) REGISTER="$2"; shift 2 ;;
 	--interval) INTERVAL="$2"; shift 2 ;;
 	--insecure) INSECURE=1; shift ;;
+	--report-only | --allow-probes)
+		[ -z "$REPORT_ONLY" ] || { echo "choose only one of --report-only and --allow-probes" >&2; exit 2; }
+		if [ "$1" = --report-only ]; then REPORT_ONLY=true; else REPORT_ONLY=false; fi
+		shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
 
 [ -n "$SERVER" ] && { [ -n "$TOKEN" ] || [ -n "$REGISTER" ]; } || {
-	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--insecure]" >&2
+	echo "usage: install.sh --server URL (--token TOKEN | --register KEY) [--interval SECONDS] [--insecure] [--report-only | --allow-probes]" >&2
 	exit 2
 }
 case "$INTERVAL" in "" | *[!0-9]*) echo "interval must be an integer from 1 to 3600" >&2; exit 2 ;; esac
@@ -114,6 +119,42 @@ elif command -v rc-update >/dev/null; then
 else
 	echo "this installer needs systemd or OpenRC" >&2
 	exit 1
+fi
+
+# Keep the local policy on reinstall, including unattended upgrades. Read only
+# this value; the root-owned environment file need not be executed by the shell.
+if [ -z "$REPORT_ONLY" ]; then
+	REPORT_ONLY=$(sed -n 's/^MONITOR_REPORT_ONLY=//p' "$ENV_FILE" 2>/dev/null || true)
+	case "$REPORT_ONLY" in
+	"") REPORT_ONLY=false ;;
+	true | false) ;;
+	*) echo "invalid MONITOR_REPORT_ONLY in $ENV_FILE; choose --report-only or --allow-probes" >&2; exit 2 ;;
+	esac
+	# stdin carries the script in `curl | sh`, so ask on the controlling tty.
+	# Without a tty retain the existing policy, or probes for a new install.
+	if ( : </dev/tty ) 2>/dev/null; then
+		if [ "$REPORT_ONLY" = true ]; then DEFAULT=1; else DEFAULT=2; fi
+		echo "1) Report only: ignore all hub tasks; no TCP probes" >/dev/tty
+		echo "2) Allow probes: report metrics and run hub-assigned TCP probes" >/dev/tty
+		while :; do
+			printf 'Agent mode [1/2, default %s]: ' "$DEFAULT" >/dev/tty
+			read -r CHOICE </dev/tty || { echo "no mode selected; use --report-only or --allow-probes" >&2; exit 2; }
+			case "${CHOICE:-$DEFAULT}" in
+			1) REPORT_ONLY=true; break ;;
+			2) REPORT_ONLY=false; break ;;
+			*) echo "choose 1 or 2" >/dev/tty ;;
+			esac
+		done
+	fi
+fi
+REPORT_ONLY_FLAG=""
+if [ "$REPORT_ONLY" = true ]; then
+	# Also pass the flag: an older binary must refuse to start rather than
+	# silently ignore the new environment variable and accept hub tasks.
+	REPORT_ONLY_FLAG=" --report-only"
+	echo "agent mode: report only (all hub tasks ignored)"
+else
+	echo "agent mode: allow hub-assigned TCP probes"
 fi
 
 # The service user the unit below runs as, created before the download and the
@@ -206,6 +247,7 @@ install -m 0755 "$TMP" "$BIN"
 	cat >"$ENV_FILE" <<ENV
 MONITOR_SERVER=$SERVER
 MONITOR_TOKEN=$TOKEN
+MONITOR_REPORT_ONLY=$REPORT_ONLY
 ENV
 )
 
@@ -214,7 +256,7 @@ if [ "$INIT" = openrc ]; then
 #!/sbin/openrc-run
 description="monitor agent"
 command="$BIN"
-command_args="--interval $INTERVAL${INSECURE:+ --insecure}"
+command_args="--interval $INTERVAL${INSECURE:+ --insecure}$REPORT_ONLY_FLAG"
 supervisor="supervise-daemon"
 respawn_delay=5
 output_log="/var/log/monitor-agent.log"
@@ -247,7 +289,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=$ENV_FILE
-ExecStart=$BIN --interval $INTERVAL${INSECURE:+ --insecure}
+ExecStart=$BIN --interval $INTERVAL${INSECURE:+ --insecure}$REPORT_ONLY_FLAG
 Restart=always
 RestartSec=5
 # A fixed user rather than DynamicUser=: when the mount namespace cannot be
